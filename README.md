@@ -1,15 +1,34 @@
 # Vocab Bot
 
-A free Discord bot for learning SAT/GRE vocabulary. This is **step 1**: a bot with 331 words and two commands.
+A free Discord bot for learning SAT/GRE vocabulary. Right now it has 331 words and these commands:
 
 - `/word` gives you a random word with its definition and an example sentence.
 - `/define abate` looks up a specific word from the list.
+- `/study` starts a flashcard session that only you can see. You see the word, press **Show answer**, then **Know it** or **Still learning**.
+- `/progress` shows how many words you've studied and mastered.
+
+## How /study picks words
+
+Every word you study goes into a box from 1 to 5. **Know it** moves the word up a box, and **Still learning** sends it back to box 1. The higher the box, the longer before you see the word again:
+
+| Box | Comes back after |
+|---|---|
+| 1 | right away (10 minutes if you just missed it) |
+| 2 | 1 day |
+| 3 | 3 days |
+| 4 | 1 week |
+| 5 | 2 weeks (mastered!) |
+
+Words that are due come first. When nothing is due, you get a new word. This is called spaced repetition, and it's how apps like Anki help you remember things long-term.
+
+Your progress is saved in `progress.db` next to `bot.py`. Don't delete it unless you want to start over.
 
 ## Files
 
 | File | What it is |
 |---|---|
 | `bot.py` | The bot itself |
+| `progress.py` | Saves your flashcard progress |
 | `words.json` | The word list (add your own words here!) |
 | `requirements.txt` | The Python libraries the bot needs |
 | `.env.example` | A template for your secret settings |
@@ -43,6 +62,9 @@ python bot.py
 
 The bot only runs while that terminal window is open. Press `Ctrl+C` to stop it.
 
+## Updating the bot
+When there's new code, download the new files (or `git pull` if you cloned the repo), stop the bot with `Ctrl+C`, and run `python bot.py` again. Your `.env` and `progress.db` stay as they are.
+
 ## Adding words
 Open `words.json` and add an entry in the same format:
 
@@ -58,5 +80,4 @@ Open `words.json` and add an entry in the same format:
 Restart the bot to pick up the changes.
 
 ## Coming next
-- **Step 2:** flashcards with "Know it" / "Still learning" buttons that remember your progress.
 - **Step 3:** daily lessons, quizzes, XP, and streaks.
