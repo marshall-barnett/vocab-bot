@@ -5,7 +5,19 @@ A free Discord bot for learning SAT/GRE vocabulary. Right now it has 331 words a
 - `/word` gives you a random word with its definition and an example sentence.
 - `/define abate` looks up a specific word from the list.
 - `/study` starts a flashcard session that only you can see. You see the word, press **Show answer**, then **Know it** or **Still learning**.
-- `/progress` shows how many words you've studied and mastered.
+- `/lesson` is your daily lesson: 10 multiple-choice questions, only visible to you. Earn XP and keep your streak alive.
+- `/progress` shows your streak, XP, and how many words you've studied and mastered.
+- `/reminder 18` pings you in that channel at 6 PM if you haven't done a lesson yet that day. Use `/reminder` with no number to turn it off.
+
+## Lessons, XP, and streaks
+
+Each lesson mixes words that are due for review with new words. Some questions show a definition and ask for the word, and others show a word and ask for its meaning.
+
+- **+10 XP** for each right answer, plus **+20 XP** for finishing the lesson.
+- Do at least one lesson a day to grow your 🔥 streak. Miss a whole day and it resets to 0.
+- Lesson answers count toward your flashcard boxes too, so `/lesson` and `/study` work together.
+
+Reminders and streaks use your computer's clock, and reminders only go out while the bot is running.
 
 ## How /study picks words
 
@@ -80,4 +92,4 @@ Open `words.json` and add an entry in the same format:
 Restart the bot to pick up the changes.
 
 ## Coming next
-- **Step 3:** daily lessons, quizzes, XP, and streaks.
+- **Step 4 (optional):** host the bot for free so it runs 24/7, and maybe build an iOS app with the same word list.

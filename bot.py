@@ -1,18 +1,22 @@
-# Vocab Bot - Step 2
+# Vocab Bot - Step 3
 # A Discord bot that teaches you SAT/GRE vocabulary words.
 #
 # Commands:
 #   /word            -> shows a random vocab word
 #   /define <word>   -> looks up a word from the list
 #   /study           -> flashcards that remember which words you know
-#   /progress        -> see how many words you've learned
+#   /lesson          -> today's lesson: 10 quiz questions, earn XP and keep your streak
+#   /progress        -> see your XP, streak, and how many words you've learned
+#   /reminder        -> get pinged if you haven't done a lesson by a certain hour
 
+import datetime
 import json
 import os
 import random
 
 import discord
 from discord import app_commands
+from discord.ext import tasks
 from dotenv import load_dotenv
 
 import progress
@@ -121,6 +125,120 @@ async def show_next_card(interaction, note=None):
         await interaction.response.edit_message(content=content, embed=embed, view=view)
 
 
+# ---------- Lessons (the Duolingo part) ----------
+
+XP_PER_CORRECT = 10
+XP_LESSON_BONUS = 20  # for finishing the whole lesson
+LETTERS = ["A", "B", "C", "D"]
+
+
+def make_question(word_name, number, total):
+    """Build one multiple-choice question about a word.
+
+    Half the time you get a definition and pick the word.
+    The other half you get a word and pick the definition.
+    Returns the question card and the index (0-3) of the right answer.
+    """
+    w = WORDS_BY_NAME[word_name.lower()]
+    wrong = random.sample([x for x in WORDS if x is not w], 3)
+    choices = wrong + [w]
+    random.shuffle(choices)
+    answer = choices.index(w)
+
+    if random.random() < 0.5:
+        prompt = f"Which word means:\n> {w['definition']}"
+        options = [c["word"] for c in choices]
+    else:
+        prompt = f"What does **{w['word']}** mean?"
+        options = [c["definition"] for c in choices]
+
+    lines = [prompt, ""] + [f"**{LETTERS[i]}.** {opt}" for i, opt in enumerate(options)]
+    card = discord.Embed(
+        title=f"Question {number} of {total}",
+        description="\n".join(lines),
+        color=discord.Color.orange(),
+    )
+    return card, answer
+
+
+class Lesson(discord.ui.View):
+    """Keeps track of one lesson: which question you're on and how many you got right."""
+
+    def __init__(self, user_id, word_names):
+        super().__init__(timeout=1800)  # 30 minutes to finish
+        self.user_id = user_id
+        self.word_names = word_names
+        self.number = 0
+        self.correct = 0
+        self.card, self.answer = make_question(word_names[0], 1, len(word_names))
+        for i, letter in enumerate(LETTERS):
+            button = discord.ui.Button(label=letter, style=discord.ButtonStyle.primary)
+            button.callback = self.make_callback(i)
+            self.add_item(button)
+
+    def make_callback(self, choice):
+        async def callback(interaction: discord.Interaction):
+            await self.check_answer(interaction, choice)
+        return callback
+
+    async def check_answer(self, interaction, choice):
+        word_name = self.word_names[self.number]
+        w = WORDS_BY_NAME[word_name.lower()]
+        right = choice == self.answer
+        progress.record_answer(self.user_id, word_name, right)
+
+        if right:
+            self.correct += 1
+            feedback = f"✅ Correct! **{w['word']}**: {w['definition']} (+{XP_PER_CORRECT} XP)"
+        else:
+            feedback = (
+                f"❌ The answer was **{LETTERS[self.answer]}**. "
+                f"**{w['word']}**: {w['definition']}\n*{w['example']}*"
+            )
+
+        self.number += 1
+        if self.number < len(self.word_names):
+            self.card, self.answer = make_question(
+                self.word_names[self.number], self.number + 1, len(self.word_names)
+            )
+            await interaction.response.edit_message(content=feedback, embed=self.card, view=self)
+        else:
+            await self.finish(interaction, feedback)
+
+    async def finish(self, interaction, feedback):
+        self.stop()
+        xp_earned = self.correct * XP_PER_CORRECT + XP_LESSON_BONUS
+        total_xp, streak = progress.finish_lesson(self.user_id, xp_earned)
+        summary = discord.Embed(
+            title="🎉 Lesson complete!",
+            description=(
+                f"You got **{self.correct} of {len(self.word_names)}** right.\n\n"
+                f"**+{xp_earned} XP** (total: {total_xp} XP)\n"
+                f"🔥 **{streak}-day streak**"
+            ),
+            color=discord.Color.green(),
+        )
+        await interaction.response.edit_message(content=feedback, embed=summary, view=None)
+
+
+@tasks.loop(minutes=1)
+async def send_reminders():
+    """Every minute, check if anyone needs their daily reminder (at most once a day)."""
+    now = datetime.datetime.now()
+    for user_id, channel_id in progress.reminders_due(now.hour):
+        channel = bot.get_channel(channel_id)
+        if channel is not None:
+            await channel.send(
+                f"<@{user_id}> 📚 Time for today's vocab lesson! Type `/lesson` to keep your streak going."
+            )
+        progress.mark_reminded(user_id)
+
+
+@send_reminders.before_loop
+async def before_reminders():
+    await bot.wait_until_ready()  # wait until the bot is logged in
+
+
 class VocabBot(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.default())
@@ -135,6 +253,7 @@ class VocabBot(discord.Client):
             await self.tree.sync(guild=guild)  # instant in your server
         else:
             await self.tree.sync()  # works everywhere, but can take up to an hour
+        send_reminders.start()
 
     async def on_ready(self):
         print(f"Logged in as {self.user}. {len(WORDS)} words loaded.")
@@ -166,12 +285,36 @@ async def study(interaction: discord.Interaction):
     await show_next_card(interaction)
 
 
-@bot.tree.command(name="progress", description="See how many words you've learned")
+@bot.tree.command(name="lesson", description="Today's lesson: 10 quiz questions (only you can see it)")
+async def lesson(interaction: discord.Interaction):
+    word_names = progress.pick_lesson_words(interaction.user.id, [w["word"] for w in WORDS])
+    view = Lesson(interaction.user.id, word_names)
+    await interaction.response.send_message(embed=view.card, view=view, ephemeral=True)
+
+
+@bot.tree.command(name="reminder", description="Get a ping if you haven't done a lesson by a certain hour")
+@app_commands.describe(hour="Hour of the day, 0-23 (for example 18 means 6 PM). Leave empty to turn off.")
+async def reminder(interaction: discord.Interaction, hour: app_commands.Range[int, 0, 23] = None):
+    progress.set_reminder(interaction.user.id, interaction.channel_id, hour)
+    if hour is None:
+        message = "Reminders are off."
+    else:
+        message = (
+            f"Got it! If you haven't done `/lesson` by **{hour}:00**, I'll ping you in this channel."
+        )
+    await interaction.response.send_message(message, ephemeral=True)
+
+
+@bot.tree.command(name="progress", description="See your XP, streak, and words learned")
 async def show_progress(interaction: discord.Interaction):
     boxes, due = progress.get_stats(interaction.user.id)
+    user = progress.get_user(interaction.user.id)
     studied = sum(boxes.values())
     mastered = boxes[5]
+    lessoned_today = user["last_lesson_date"] == progress.today()
     lines = [
+        f"🔥 **Streak:** {user['streak']} day(s)" + ("" if lessoned_today else " (do `/lesson` today!)"),
+        f"⭐ **XP:** {user['xp']}",
         f"**Words studied:** {studied} of {len(WORDS)}",
         f"**Mastered (box 5):** {mastered}",
         f"**Due for review now:** {due}",
