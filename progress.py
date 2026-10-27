@@ -22,6 +22,9 @@ RETRY_SECONDS = 10 * 60
 
 SECONDS_PER_DAY = 24 * 60 * 60
 
+# New words are picked at random from the next 25 easiest words you haven't seen.
+NEXT_UP = 25
+
 
 def connect():
     db = sqlite3.connect(DB_FILE)
@@ -64,9 +67,10 @@ def pick_word(user_id, all_words):
 
         # 2. Otherwise, a brand new word you haven't studied yet.
         seen = {r[0] for r in db.execute("SELECT word FROM cards WHERE user_id = ?", (user_id,))}
+    # all_words is sorted from most common to rarest, so you meet easier words first.
     new_words = [w for w in all_words if w not in seen]
     if new_words:
-        return random.choice(new_words)
+        return random.choice(new_words[:NEXT_UP])
 
     # 3. You've studied every word and nothing is due. Nice!
     return None
@@ -93,6 +97,16 @@ def record_answer(user_id, word, knew_it):
             (user_id, word, box, due_at),
         )
     return box
+
+
+def add_word(user_id, word):
+    """Put a word you looked up into your flashcards (box 1, ready to study now)."""
+    with connect() as db:
+        added = db.execute(
+            "INSERT OR IGNORE INTO cards (user_id, word, box, due_at) VALUES (?, ?, 1, ?)",
+            (user_id, word, time.time()),
+        ).rowcount
+    return added == 1  # False if it was already in your flashcards
 
 
 def get_stats(user_id):
@@ -130,7 +144,7 @@ def pick_lesson_words(user_id, all_words, count=10):
         ]
         seen = {r[0] for r in db.execute("SELECT word FROM cards WHERE user_id = ?", (user_id,))}
     picked = due[:count]
-    new_words = [w for w in all_words if w not in seen]
+    new_words = [w for w in all_words if w not in seen][:NEXT_UP]
     random.shuffle(new_words)
     picked += new_words[: count - len(picked)]
 

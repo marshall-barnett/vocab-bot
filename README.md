@@ -1,13 +1,30 @@
 # Vocab Bot
 
-A free Discord bot for learning SAT/GRE vocabulary. Right now it has 331 words and these commands:
+A free Discord bot for learning SAT/GRE vocabulary. It teaches from about 1,700 SAT/GRE words, and `/define` can look up any English word. These are the commands:
 
-- `/word` gives you a random word with its definition and an example sentence.
-- `/define abate` looks up a specific word from the list.
+- `/word` gives you a random word with its definition, an example sentence (when there is one), and how rare it is.
+- `/define abate` looks up any English word. Press **Add to my flashcards** to study it.
 - `/study` starts a flashcard session that only you can see. You see the word, press **Show answer**, then **Know it** or **Still learning**.
 - `/lesson` is your daily lesson: 10 multiple-choice questions, only visible to you. Earn XP and keep your streak alive.
 - `/progress` shows your streak, XP, and how many words you've studied and mastered.
 - `/reminder 18` pings you in that channel at 6 PM if you haven't done a lesson yet that day. Use `/reminder` with no number to turn it off.
+
+## Where the words come from
+
+- `words.json` has 331 words with hand-written definitions and examples.
+- `more_words.txt` has about 1,400 more SAT/GRE words, one per line, with no definitions.
+- Definitions for those words, and for anything you `/define`, come from the [Free Dictionary API](https://dictionaryapi.dev). It's free and needs no account or key. Its definitions come from Wiktionary.
+- Every word the bot downloads is saved in `word_cache.json`, so each word is only downloaded once.
+
+### How the bot decides which words to teach
+
+The bot uses the free [wordfreq](https://github.com/rspeer/wordfreq) library to score how common each word is in everyday English. It works offline.
+
+- Words that are too common (as common as "benefit" or "cat") are never picked for lessons or flashcards. You can change this line in `dictionary.py`: `TOO_COMMON = 4.0`. A lower number skips more words.
+- New words come in order from more common to rarer, so lessons start easier and get harder as you learn.
+- Each word card shows its rarity from ★☆☆☆☆ (fairly common) to ★★★★★ (very rare).
+
+Want more words? Add them to `more_words.txt`, one per line, and restart the bot. You don't need to write definitions.
 
 ## Lessons, XP, and streaks
 
@@ -41,7 +58,9 @@ Your progress is saved in `progress.db` next to `bot.py`. Don't delete it unless
 |---|---|
 | `bot.py` | The bot itself |
 | `progress.py` | Saves your flashcard progress |
-| `words.json` | The word list (add your own words here!) |
+| `dictionary.py` | Looks up words online and scores how rare they are |
+| `words.json` | 331 words with hand-written definitions |
+| `more_words.txt` | About 1,400 more words (definitions come from the dictionary) |
 | `requirements.txt` | The Python libraries the bot needs |
 | `.env.example` | A template for your secret settings |
 
@@ -70,15 +89,17 @@ pip install -r requirements.txt
 python bot.py
 ```
 
-(On Mac, use `pip3` and `python3`.) When you see `Logged in as Vocab Bot... 331 words loaded.`, go to your server and type `/word`.
+(On Mac, use `pip3` and `python3`.) When you see `Logged in as Vocab Bot... words ready to learn.`, go to your server and type `/word`.
 
 The bot only runs while that terminal window is open. Press `Ctrl+C` to stop it.
 
 ## Updating the bot
-When there's new code, download the new files (or `git pull` if you cloned the repo), stop the bot with `Ctrl+C`, and run `python bot.py` again. Your `.env` and `progress.db` stay as they are.
+When there's new code, download the new files (or `git pull` if you cloned the repo), stop the bot with `Ctrl+C`, run `pip install -r requirements.txt` in case there's a new library, and run `python bot.py` again. Your `.env` and `progress.db` stay as they are.
 
 ## Adding words
-Open `words.json` and add an entry in the same format:
+The easy way: add the word to `more_words.txt` on its own line. The definition comes from the dictionary.
+
+To write your own definition instead, open `words.json` and add an entry in the same format:
 
 ```json
 {
