@@ -1,14 +1,15 @@
-# Vocab Bot - Step 3
+# Vocab Bot - Step 3 + dictionary
 # A Discord bot that teaches you SAT/GRE vocabulary words.
 #
 # Commands:
 #   /word            -> shows a random vocab word
-#   /define <word>   -> looks up a word from the list
+#   /define <word>   -> looks up ANY English word (and lets you add it to your flashcards)
 #   /study           -> flashcards that remember which words you know
 #   /lesson          -> today's lesson: 10 quiz questions, earn XP and keep your streak
 #   /progress        -> see your XP, streak, and how many words you've learned
 #   /reminder        -> get pinged if you haven't done a lesson by a certain hour
 
+import asyncio
 import datetime
 import json
 import os
@@ -19,6 +20,7 @@ from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
 
+import dictionary
 import progress
 
 # Load the secret bot token (and your server id) from the .env file.
@@ -35,6 +37,40 @@ with open(WORDS_FILE, encoding="utf-8") as f:
 # A dictionary so we can find a word quickly by its name.
 WORDS_BY_NAME = {w["word"].lower(): w for w in WORDS}
 
+# About 1,400 more SAT/GRE words. This file is just the words, one per line.
+# Their definitions come from the online dictionary (see dictionary.py).
+MORE_WORDS_FILE = os.path.join(os.path.dirname(__file__), "more_words.txt")
+with open(MORE_WORDS_FILE, encoding="utf-8") as f:
+    MORE_WORDS = [line.strip().lower() for line in f if line.strip()]
+
+# Every word the bot can teach you. Words that are too common (like "cat") are left out,
+# and the rest are sorted from most common to rarest, so lessons start easier and get harder.
+WORD_POOL = sorted(
+    {w for w in list(WORDS_BY_NAME) + MORE_WORDS if dictionary.worth_learning(w)},
+    key=dictionary.how_common,
+    reverse=True,
+)
+
+
+def teachable_words():
+    """The word pool, minus any words the online dictionary turned out not to have."""
+    return [w for w in WORD_POOL if not dictionary.is_missing(w)]
+
+
+async def get_word(word_name):
+    """Find a word's card: from words.json if it's there, otherwise from the online dictionary.
+    Returns None if the word can't be found (or the internet is down)."""
+    return WORDS_BY_NAME.get(word_name.lower()) or await dictionary.lookup(word_name)
+
+
+async def random_word():
+    """A random word from the pool, with its card. Tries a few words in case one is missing."""
+    for _ in range(5):
+        w = await get_word(random.choice(teachable_words()))
+        if w:
+            return w
+    return random.choice(WORDS)  # the dictionary isn't answering, so use our own list
+
 
 def make_word_card(w):
     """Turn a word into a nice-looking Discord embed (the colored box)."""
@@ -43,7 +79,12 @@ def make_word_card(w):
         description=f"*{w['part_of_speech']}*\n\n{w['definition']}",
         color=discord.Color.blurple(),
     )
-    card.add_field(name="Example", value=w["example"], inline=False)
+    if w["example"]:
+        card.add_field(name="Example", value=w["example"], inline=False)
+    footer = f"Rarity {dictionary.rarity_stars(w['word'])}"
+    if w.get("source"):
+        footer += "  ·  Definition from Wiktionary via dictionaryapi.dev"
+    card.set_footer(text=footer)
     return card
 
 
@@ -66,7 +107,14 @@ class CardFront(discord.ui.View):
 
     @discord.ui.button(label="Show answer", style=discord.ButtonStyle.primary)
     async def show_answer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        w = WORDS_BY_NAME[self.word_name.lower()]
+        w = await get_word(self.word_name)
+        if w is None:
+            await interaction.response.edit_message(
+                content="Sorry, I couldn't reach the dictionary. Try `/study` again in a bit.",
+                embed=None,
+                view=None,
+            )
+            return
         await interaction.response.edit_message(
             embed=make_word_card(w), view=CardBack(self.user_id, self.word_name)
         )
@@ -105,24 +153,45 @@ class CardBack(discord.ui.View):
 
 async def show_next_card(interaction, note=None):
     """Show the front of the next flashcard (or say you're all caught up)."""
+    typed_command = interaction.type == discord.InteractionType.application_command
+    # Looking words up online can take a moment, so tell Discord we're working on it.
+    if typed_command:
+        await interaction.response.defer(ephemeral=True)
+    else:
+        await interaction.response.defer()
+
     user_id = interaction.user.id
-    word_name = progress.pick_word(user_id, [w["word"] for w in WORDS])
+    word_name, w = None, None
+    for _ in range(5):  # a few tries, in case the dictionary doesn't have a word
+        word_name = progress.pick_word(user_id, teachable_words())
+        if word_name is None:
+            break
+        w = await get_word(word_name)
+        if w or not dictionary.is_missing(word_name):
+            break  # found it, or the internet is down (so trying again won't help)
+
+    content = note
     if word_name is None:
         content = (note + "\n\n" if note else "") + (
             "🎉 You're all caught up! No words are due right now. Come back later."
         )
         embed, view = None, None
+    elif w is None:
+        content = "Sorry, I couldn't reach the dictionary. Try `/study` again in a bit."
+        embed, view = None, None
     else:
-        content = note
-        embed = make_card_front(WORDS_BY_NAME[word_name.lower()])
+        embed = make_card_front(w)
         view = CardFront(user_id, word_name)
 
-    if interaction.type == discord.InteractionType.application_command:
+    if typed_command:
         # Typed /study: send a new private message.
-        await interaction.response.send_message(content=content, embed=embed, view=view, ephemeral=True)
+        extras = {"embed": embed} if embed else {}
+        if view:
+            extras["view"] = view
+        await interaction.followup.send(content=content, ephemeral=True, **extras)
     else:
         # Clicked a button: swap the card in the same message.
-        await interaction.response.edit_message(content=content, embed=embed, view=view)
+        await interaction.edit_original_response(content=content, embed=embed, view=view)
 
 
 # ---------- Lessons (the Duolingo part) ----------
@@ -132,25 +201,26 @@ XP_LESSON_BONUS = 20  # for finishing the whole lesson
 LETTERS = ["A", "B", "C", "D"]
 
 
-def make_question(word_name, number, total):
+def make_question(w, number, total):
     """Build one multiple-choice question about a word.
 
     Half the time you get a definition and pick the word.
     The other half you get a word and pick the definition.
     Returns the question card and the index (0-3) of the right answer.
     """
-    w = WORDS_BY_NAME[word_name.lower()]
-    wrong = random.sample([x for x in WORDS if x is not w], 3)
+    # Wrong answers come from our own list plus every word downloaded so far.
+    others = {c["word"]: c for c in WORDS + dictionary.cached_cards() if c["word"] != w["word"]}
+    wrong = random.sample(list(others.values()), 3)
     choices = wrong + [w]
     random.shuffle(choices)
     answer = choices.index(w)
 
     if random.random() < 0.5:
-        prompt = f"Which word means:\n> {w['definition']}"
+        prompt = f"Which word means:\n> {dictionary.hide_word(w['word'], w['definition'])}"
         options = [c["word"] for c in choices]
     else:
         prompt = f"What does **{w['word']}** mean?"
-        options = [c["definition"] for c in choices]
+        options = [dictionary.hide_word(c["word"], c["definition"]) for c in choices]
 
     lines = [prompt, ""] + [f"**{LETTERS[i]}.** {opt}" for i, opt in enumerate(options)]
     card = discord.Embed(
@@ -164,13 +234,13 @@ def make_question(word_name, number, total):
 class Lesson(discord.ui.View):
     """Keeps track of one lesson: which question you're on and how many you got right."""
 
-    def __init__(self, user_id, word_names):
+    def __init__(self, user_id, words):
         super().__init__(timeout=1800)  # 30 minutes to finish
         self.user_id = user_id
-        self.word_names = word_names
+        self.words = words  # the word cards for this lesson
         self.number = 0
         self.correct = 0
-        self.card, self.answer = make_question(word_names[0], 1, len(word_names))
+        self.card, self.answer = make_question(words[0], 1, len(words))
         for i, letter in enumerate(LETTERS):
             button = discord.ui.Button(label=letter, style=discord.ButtonStyle.primary)
             button.callback = self.make_callback(i)
@@ -182,10 +252,9 @@ class Lesson(discord.ui.View):
         return callback
 
     async def check_answer(self, interaction, choice):
-        word_name = self.word_names[self.number]
-        w = WORDS_BY_NAME[word_name.lower()]
+        w = self.words[self.number]
         right = choice == self.answer
-        progress.record_answer(self.user_id, word_name, right)
+        progress.record_answer(self.user_id, w["word"], right)
 
         if right:
             self.correct += 1
@@ -193,13 +262,15 @@ class Lesson(discord.ui.View):
         else:
             feedback = (
                 f"❌ The answer was **{LETTERS[self.answer]}**. "
-                f"**{w['word']}**: {w['definition']}\n*{w['example']}*"
+                f"**{w['word']}**: {w['definition']}"
             )
+            if w["example"]:
+                feedback += f"\n*{w['example']}*"
 
         self.number += 1
-        if self.number < len(self.word_names):
+        if self.number < len(self.words):
             self.card, self.answer = make_question(
-                self.word_names[self.number], self.number + 1, len(self.word_names)
+                self.words[self.number], self.number + 1, len(self.words)
             )
             await interaction.response.edit_message(content=feedback, embed=self.card, view=self)
         else:
@@ -212,7 +283,7 @@ class Lesson(discord.ui.View):
         summary = discord.Embed(
             title="🎉 Lesson complete!",
             description=(
-                f"You got **{self.correct} of {len(self.word_names)}** right.\n\n"
+                f"You got **{self.correct} of {len(self.words)}** right.\n\n"
                 f"**+{xp_earned} XP** (total: {total_xp} XP)\n"
                 f"🔥 **{streak}-day streak**"
             ),
@@ -256,28 +327,47 @@ class VocabBot(discord.Client):
         send_reminders.start()
 
     async def on_ready(self):
-        print(f"Logged in as {self.user}. {len(WORDS)} words loaded.")
+        print(f"Logged in as {self.user}. {len(WORD_POOL)} words ready to learn.")
 
 
 bot = VocabBot()
 
 
+class AddWord(discord.ui.View):
+    """The button under /define that adds the word to your own flashcards."""
+
+    def __init__(self, word_name):
+        super().__init__(timeout=600)
+        self.word_name = word_name
+
+    @discord.ui.button(label="Add to my flashcards", emoji="➕", style=discord.ButtonStyle.success)
+    async def add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if progress.add_word(interaction.user.id, self.word_name):
+            message = f"Added **{self.word_name}**! It'll show up in your next `/study` or `/lesson`."
+        else:
+            message = f"**{self.word_name}** is already in your flashcards."
+        await interaction.response.send_message(message, ephemeral=True)
+
+
 @bot.tree.command(name="word", description="Get a random SAT/GRE vocab word")
 async def word(interaction: discord.Interaction):
-    w = random.choice(WORDS)
-    await interaction.response.send_message(embed=make_word_card(w))
+    await interaction.response.defer()  # looking it up can take a second
+    w = await random_word()
+    await interaction.followup.send(embed=make_word_card(w))
 
 
-@bot.tree.command(name="define", description="Look up a word from the vocab list")
+@bot.tree.command(name="define", description="Look up any English word")
 @app_commands.describe(word="The word to look up")
 async def define(interaction: discord.Interaction, word: str):
-    w = WORDS_BY_NAME.get(word.lower().strip())
-    if w is None:
-        await interaction.response.send_message(
-            f"Sorry, **{word}** isn't in the word list yet.", ephemeral=True
-        )
+    await interaction.response.defer()  # looking it up can take a second
+    word = word.lower().strip()
+    w = await get_word(word)
+    if w is not None:
+        await interaction.followup.send(embed=make_word_card(w), view=AddWord(w["word"]))
+    elif dictionary.is_missing(word):
+        await interaction.followup.send(f"Sorry, I couldn't find **{word}** in the dictionary.")
     else:
-        await interaction.response.send_message(embed=make_word_card(w))
+        await interaction.followup.send("Sorry, I couldn't reach the dictionary. Try again in a bit.")
 
 
 @bot.tree.command(name="study", description="Study flashcards (only you can see them)")
@@ -287,9 +377,19 @@ async def study(interaction: discord.Interaction):
 
 @bot.tree.command(name="lesson", description="Today's lesson: 10 quiz questions (only you can see it)")
 async def lesson(interaction: discord.Interaction):
-    word_names = progress.pick_lesson_words(interaction.user.id, [w["word"] for w in WORDS])
-    view = Lesson(interaction.user.id, word_names)
-    await interaction.response.send_message(embed=view.card, view=view, ephemeral=True)
+    await interaction.response.defer(ephemeral=True)  # looking words up can take a second
+    word_names = progress.pick_lesson_words(interaction.user.id, teachable_words())
+    # Look up all the words at the same time (faster than one by one).
+    found = await asyncio.gather(*(get_word(name) for name in word_names))
+    words = [w for w in found if w]
+
+    # If some words couldn't be found, fill the lesson up with words from our own list.
+    picked = {w["word"] for w in words}
+    spare = [w for w in WORDS if w["word"] not in picked]
+    words += random.sample(spare, len(word_names) - len(words))
+
+    view = Lesson(interaction.user.id, words)
+    await interaction.followup.send(embed=view.card, view=view, ephemeral=True)
 
 
 @bot.tree.command(name="reminder", description="Get a ping if you haven't done a lesson by a certain hour")
@@ -315,7 +415,7 @@ async def show_progress(interaction: discord.Interaction):
     lines = [
         f"🔥 **Streak:** {user['streak']} day(s)" + ("" if lessoned_today else " (do `/lesson` today!)"),
         f"⭐ **XP:** {user['xp']}",
-        f"**Words studied:** {studied} of {len(WORDS)}",
+        f"**Words studied:** {studied} of {len(WORD_POOL)}",
         f"**Mastered (box 5):** {mastered}",
         f"**Due for review now:** {due}",
         "",

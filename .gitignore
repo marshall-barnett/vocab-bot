@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 venv/
 progress.db
+word_cache.json
